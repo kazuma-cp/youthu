@@ -1,0 +1,14 @@
+
+services:
+  - type: web
+    name: ai-short-studio
+    runtime: docker
+    plan: starter
+    healthCheckPath: /
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: STUDIO_PASSWORD
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
