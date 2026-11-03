@@ -27,30 +27,32 @@ MODEL_NAME = os.getenv('WHISPER_MODEL', 'tiny')  # tiny is practical on small CP
 MAX_SOURCE_SECONDS = int(os.getenv('MAX_SOURCE_SECONDS', '3600'))
 MAX_JOBS_BYTES = 650 * 1024 * 1024
 
-HTML = '''<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>AI Short Studio</title>
-<style>body{background:#11131c;color:white;font:16px system-ui;max-width:560px;margin:25px auto;padding:18px}
-.card{background:#242736;padding:23px;border-radius:16px}h1{color:#ac9cff}label{display:block;margin-top:14px}
-input,button,select{box-sizing:border-box;width:100%;padding:13px;margin-top:7px;border:0;border-radius:9px}
-button{background:#7769f4;color:#fff;font-weight:bold}input[type=checkbox]{width:auto}video{width:100%;max-height:75vh}
-a{color:#b9adff}.error{color:#ffa0a0}.muted{color:#c0c3d4;font-size:13px}</style></head><body>
+HTML = '''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AI Short Studio</title>
+<style>body{background:#11131c;color:white;font:16px system-ui;max-width:680px;margin:20px auto;padding:16px}.card{background:#242736;padding:20px;border-radius:16px}h1{color:#ac9cff}label{display:block;margin-top:12px}input,button,select{box-sizing:border-box;width:100%;padding:12px;margin-top:7px;border:0;border-radius:9px}button{background:#7769f4;color:#fff;font-weight:bold}input[type=checkbox]{width:auto}video{width:100%;max-height:70vh}a{color:#b9adff}.error{color:#ffa0a0}.muted{color:#c0c3d4;font-size:13px}.clip{border:1px solid #565b70;border-radius:12px;padding:12px;margin:12px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.clip h4{margin:0 0 5px}</style></head><body>
 <h1>AI Short Studio</h1><div class="card">
 {% if login %}<h3>ログイン</h3><form method="post" action="/login"><input type="password" name="password" required placeholder="パスワード"><button>ログイン</button></form>
-{% else %}<h3>見出し付き・元字幕を活かすShorts</h3>
-<form method="post" action="/edit" enctype="multipart/form-data">
-<label>動画ファイル（MP4・MOV）</label><input type="file" name="video" accept=".mp4,.mov">
-<label>または YouTube URL（利用権限がある動画のみ）</label><input name="url" type="url" placeholder="https://www.youtube.com/watch?v=...">
-<label>上の赤い見出し（元動画の内容と一致する言葉）</label><input name="headline" maxlength="30" placeholder="例：ヒカルが語る意外な助言" required>
+{% else %}<h3>MP4を1回アップロード → 3〜5本を一括生成</h3>
+<form method="post" action="/batch" enctype="multipart/form-data">
+<label>元動画ファイル（MP4・MOV、最大400MB）</label><input type="file" name="video" accept=".mp4,.mov" required>
+<p class="muted">YouTube URLの直接取得はサーバー側でブロックされる場合があるため、権利のある動画ファイルを使用してください。</p>
 <label>字幕設定</label><select name="caption_mode"><option value="original">元字幕をそのまま残す（追加字幕なし）</option><option value="auto">元字幕がない素材のみ自動字幕を追加</option></select>
-<label>長さ</label><select name="length"><option value="35">35秒</option><option value="30">30秒</option><option value="40">40秒</option><option value="45">45秒</option></select>
-<label>開始位置（秒） — 会話の導入から指定推奨。空欄は音量による暫定選定</label><input type="number" min="0" name="start" step="1" placeholder="自動で選ぶ">
+<label>生成本数</label><select name="count"><option value="3">3本</option><option value="4" selected>4本</option><option value="5">5本</option></select>
+<p class="muted">使用する行だけ入力してください。開始秒数は必須。異なる場面を指定すると重複を避けられます。</p>
+{% for i in range(1,6) %}<div class="clip"><h4>切り抜き {{i}}</h4><label>赤い見出し</label><input name="headline_{{i}}" maxlength="26" placeholder="例：堀大輔の発言に細川が反論"><div class="grid"><label>開始位置（秒）<input name="start_{{i}}" type="number" min="0" step="1" placeholder="1020"></label><label>長さ<select name="length_{{i}}"><option value="35">35秒</option><option value="30">30秒</option><option value="40">40秒</option><option value="45">45秒</option></select></label></div></div>{% endfor %}
 <label><input type="checkbox" name="licensed" required> この素材を編集・利用する権利を持っています</label>
-<button type="submit">赤い見出し＋元音声で生成</button>
-</form><p class="muted">元字幕は映像の一部として保持します。会話の途中切れを防ぐには、導入から結論までを含む開始秒数を指定してください。空欄の場合は音量を使った仮選定で、文脈確認はできません。</p>
-{% if video %}<h3>生成結果</h3><p>{{info}}</p><video controls preload="metadata" src="/video/{{video}}"></video>
-<p><a href="/download/{{video}}">MP4を保存</a></p><p>公開前に音声・字幕・権利を必ず確認してください。</p>{% endif %}
+<button type="submit">3〜5本を一括生成する</button></form>
+<p class="muted">生成中は画面を閉じないでください。1本ずつ処理するため数分かかる場合があります。開始秒数は会話の導入に合わせて指定し、公開前に内容と権利を確認してください。</p>
+{% if results %}<h3>生成結果：{{results|length}}本</h3>{% for item in results %}<div class="clip"><h4>{{item.headline}}</h4><p>{{item.start}}秒から{{item.length}}秒</p><video controls preload="metadata" src="/video/{{item.id}}"></video><p><a href="/download/{{item.id}}">このMP4を保存</a></p></div>{% endfor %}{% endif %}
+{% if warnings %}{% for warning in warnings %}<p class="error">{{warning}}</p>{% endfor %}{% endif %}
 <a href="/logout">ログアウト</a>{% endif %}
 {% if error %}<p class="error">{{error}}</p>{% endif %}</div></body></html>'''
+
+
+def page(**kwargs):
+    values = dict(login=not authorized(), results=None, warnings=None, error=None)
+    values.update(kwargs)
+    return render_template_string(HTML, **values)
+
 
 
 def authorized():
@@ -203,7 +205,7 @@ def create_clip(source, folder, length, start, headline, caption_mode='original'
         count = subtitles_srt(audio, subs)
         if count:
             # Subtitle position within preserved original-image area.
-            vf += (",subtitles={subs}:force_style='FontName=Noto Sans CJK JP,"
+            vf += (f",subtitles={subs}:force_style='FontName=Noto Sans CJK JP,"
                    "FontSize=17,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
                    "BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=115'")
     run(['ffmpeg', '-nostdin', '-y', '-ss', str(start), '-i', str(source),
@@ -216,14 +218,14 @@ def create_clip(source, folder, length, start, headline, caption_mode='original'
 
 @app.get('/')
 def home():
-    return render_template_string(HTML, login=not authorized(), video=None, error=None, info=None)
+    return page()
 
 @app.post('/login')
 def login():
     if not PASSWORD or not app.secret_key:
-        return render_template_string(HTML, login=True, video=None, error='管理者に環境変数の設定を依頼してください', info=None), 503
+        return page(login=True, error='管理者に環境変数の設定を依頼してください'), 503
     if not hmac.compare_digest(request.form.get('password', ''), PASSWORD):
-        return render_template_string(HTML, login=True, video=None, error='パスワードが違います', info=None), 403
+        return page(login=True, error='パスワードが違います'), 403
     session.clear()
     session['ok'] = True
     return redirect('/')
@@ -233,52 +235,64 @@ def logout():
     session.clear()
     return redirect('/')
 
-
-@app.post('/edit')
-def edit():
+@app.post('/batch')
+def batch():
     if not authorized():
         abort(401)
     if request.form.get('licensed') != 'on':
         abort(400, '素材の利用権限を確認してください')
     upload = request.files.get('video')
-    url = request.form.get('url', '').strip()
-    if bool(upload and upload.filename) == bool(url):
-        abort(400, '動画ファイルかYouTube URLのどちらか一方を指定してください')
-    folder = ROOT / uuid.uuid4().hex
-    folder.mkdir(mode=0o700)
-    source = folder / 'source.mp4'
+    if not upload or not upload.filename or Path(upload.filename).suffix.lower() not in ('.mp4', '.mov'):
+        return page(error='MP4またはMOVをアップロードしてください'), 400
     try:
-        if upload and upload.filename:
-            if Path(upload.filename).suffix.lower() not in ('.mp4', '.mov'):
-                raise ValueError('MP4またはMOVのみ利用できます')
-            upload.save(source)
-        else:
-            download_authorized_youtube(url, source)
-        if source.stat().st_size > MAX_JOBS_BYTES:
-            raise ValueError('動画ファイルが大きすぎます')
-        length = int(request.form.get('length', '35'))
-        if length not in (30, 35, 40, 45):
-            raise ValueError('動画の長さが不正です')
-        start_value = request.form.get('start', '').strip()
-        start = int(start_value) if start_value else None
-        if start is not None and start < 0:
-            raise ValueError('開始秒数は0以上にしてください')
+        count = int(request.form.get('count', '4'))
+        if count not in (3, 4, 5):
+            raise ValueError('生成本数は3〜5本です')
         mode = request.form.get('caption_mode', 'original')
         if mode not in ('original', 'auto'):
             raise ValueError('字幕設定が不正です')
-        pos, seconds, caption_count = create_clip(
-            source, folder, length, start, request.form.get('headline', ''), mode)
-        info = f'元動画の{pos}秒から{seconds}秒・元音声を保持・赤い見出しあり・追加字幕{caption_count}件'
-        return render_template_string(HTML, login=False, video=folder.name, error=None, info=info)
-    except (ValueError, OSError, subprocess.SubprocessError, Exception) as exc:
-        # Never surface raw yt-dlp errors or URLs that could include private information.
-        app.logger.warning('Failed to create clip: %s', str(exc)[:500])
-        shutil.rmtree(folder, ignore_errors=True)
-        return render_template_string(HTML, login=False, video=None,
-            error='動画生成に失敗しました。動画形式、字幕用の音声、YouTubeの取得制限、サーバーの空き容量を確認してください。', info=None), 422
+        specs = []
+        for i in range(1, count + 1):
+            headline = request.form.get(f'headline_{i}', '').strip()
+            start_raw = request.form.get(f'start_{i}', '').strip()
+            length = int(request.form.get(f'length_{i}', '35'))
+            if not headline or not start_raw or len(headline) > 26:
+                raise ValueError(f'{i}本目の見出しと開始秒数を入力してください（見出し26文字以内）')
+            if length not in (30, 35, 40, 45) or int(start_raw) < 0:
+                raise ValueError(f'{i}本目の開始秒数・長さが不正です')
+            specs.append((headline, int(start_raw), length))
+    except (ValueError, TypeError) as exc:
+        return page(error=str(exc)), 400
+    job = ROOT / uuid.uuid4().hex
+    job.mkdir(mode=0o700)
+    source = job / 'source.mp4'
+    results, warnings = [], []
+    try:
+        upload.save(source)
+        if source.stat().st_size > MAX_JOBS_BYTES:
+            raise ValueError('ファイルが大きすぎます')
+        duration = media_duration(source)
+        for i, (headline, start, length) in enumerate(specs, 1):
+            if start + length > duration:
+                warnings.append(f'{i}本目：元動画の終了時刻を超えるためスキップしました')
+                continue
+            folder = ROOT / uuid.uuid4().hex
+            folder.mkdir(mode=0o700)
+            try:
+                pos, seconds, _ = create_clip(source, folder, length, start, headline, mode)
+                results.append(dict(id=folder.name, headline=headline, start=pos, length=seconds))
+            except Exception as exc:
+                app.logger.warning('Clip %d failed: %s', i, str(exc)[:500])
+                warnings.append(f'{i}本目の生成に失敗しました。Renderのログを確認してください')
+                shutil.rmtree(folder, ignore_errors=True)
+        if not results:
+            return page(error='生成できませんでした。動画形式、開始位置、Renderのログを確認してください', warnings=warnings), 422
+        return page(results=results, warnings=warnings)
+    except Exception as exc:
+        app.logger.warning('Batch failed: %s', str(exc)[:500])
+        return page(error='アップロードまたは動画の読み込みに失敗しました'), 422
     finally:
-        source.unlink(missing_ok=True)
-        (folder / 'clip.wav').unlink(missing_ok=True)
+        shutil.rmtree(job, ignore_errors=True)
 
 
 def clip_path(video_id):
