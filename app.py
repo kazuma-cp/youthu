@@ -5,6 +5,7 @@ Requires ffmpeg with libass, yt-dlp, and faster-whisper; CPU inference may be sl
 import hmac
 import textwrap
 import math
+import statistics
 import os
 import re
 import shutil
@@ -31,17 +32,17 @@ HTML = '''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name=
 <style>body{background:#11131c;color:white;font:16px system-ui;max-width:680px;margin:20px auto;padding:16px}.card{background:#242736;padding:20px;border-radius:16px}h1{color:#ac9cff}label{display:block;margin-top:12px}input,button,select{box-sizing:border-box;width:100%;padding:12px;margin-top:7px;border:0;border-radius:9px}button{background:#7769f4;color:#fff;font-weight:bold}input[type=checkbox]{width:auto}video{width:100%;max-height:70vh}a{color:#b9adff}.error{color:#ffa0a0}.muted{color:#c0c3d4;font-size:13px}.clip{border:1px solid #565b70;border-radius:12px;padding:12px;margin:12px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.clip h4{margin:0 0 5px}</style></head><body>
 <h1>AI Short Studio</h1><div class="card">
 {% if login %}<h3>ログイン</h3><form method="post" action="/login"><input type="password" name="password" required placeholder="パスワード"><button>ログイン</button></form>
-{% else %}<h3>MP4を1回アップロード → 3〜5本を一括生成</h3>
+{% else %}<h3>MP4を1回アップロード → AIが見どころを自動選定</h3>
 <form method="post" action="/batch" enctype="multipart/form-data">
 <label>元動画ファイル（MP4・MOV、最大400MB）</label><input type="file" name="video" accept=".mp4,.mov" required>
 <p class="muted">YouTube URLの直接取得はサーバー側でブロックされる場合があるため、権利のある動画ファイルを使用してください。</p>
 <label>字幕設定</label><select name="caption_mode"><option value="original">元字幕をそのまま残す（追加字幕なし）</option><option value="auto">元字幕がない素材のみ自動字幕を追加</option></select>
 <label>生成本数</label><select name="count"><option value="3">3本</option><option value="4" selected>4本</option><option value="5">5本</option></select>
-<p class="muted">使用する行だけ入力してください。開始秒数は必須。異なる場面を指定すると重複を避けられます。</p>
+<label><input type="checkbox" name="manual"> 手動で見出し・開始位置を指定する（通常は不要）</label><p class="muted">通常は入力不要。音声の文字起こしと発話密度から、重複しない場面を自動選定します。選定結果は必ず確認してください。</p>
 {% for i in range(1,6) %}<div class="clip"><h4>切り抜き {{i}}</h4><label>赤い見出し</label><input name="headline_{{i}}" maxlength="26" placeholder="例：堀大輔の発言に細川が反論"><div class="grid"><label>開始位置（秒）<input name="start_{{i}}" type="number" min="0" step="1" placeholder="1020"></label><label>長さ<select name="length_{{i}}"><option value="35">35秒</option><option value="30">30秒</option><option value="40">40秒</option><option value="45">45秒</option></select></label></div></div>{% endfor %}
 <label><input type="checkbox" name="licensed" required> この素材を編集・利用する権利を持っています</label>
-<button type="submit">3〜5本を一括生成する</button></form>
-<p class="muted">生成中は画面を閉じないでください。1本ずつ処理するため数分かかる場合があります。開始秒数は会話の導入に合わせて指定し、公開前に内容と権利を確認してください。</p>
+<button type="submit">見どころを自動分析して3〜5本生成</button></form>
+<p class="muted">生成中は画面を閉じないでください。長尺動画の文字起こしには時間がかかり、Renderのタイムアウトで失敗する可能性があります。見出しは発言の一部を引用した暫定案です。公開前に文脈・正確性・権利を確認してください。</p>
 {% if results %}<h3>生成結果：{{results|length}}本</h3>{% for item in results %}<div class="clip"><h4>{{item.headline}}</h4><p>{{item.start}}秒から{{item.length}}秒</p><video controls preload="metadata" src="/video/{{item.id}}"></video><p><a href="/download/{{item.id}}">このMP4を保存</a></p></div>{% endfor %}{% endif %}
 {% if warnings %}{% for warning in warnings %}<p class="error">{{warning}}</p>{% endfor %}{% endif %}
 <a href="/logout">ログアウト</a>{% endif %}
@@ -235,6 +236,66 @@ def logout():
     session.clear()
     return redirect('/')
 
+def select_highlights(source, duration, count):
+    """Transcript-grounded heuristic ranking; no virality or semantic guarantee."""
+    from faster_whisper import WhisperModel
+    audio = source.parent / 'analysis.wav'
+    run(['ffmpeg', '-nostdin', '-y', '-i', str(source), '-vn', '-ac', '1',
+         '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)], 240)
+    try:
+        model = WhisperModel(MODEL_NAME, device='cpu', compute_type='int8', cpu_threads=2)
+        segments, _ = model.transcribe(str(audio), language='ja', beam_size=1,
+                                      vad_filter=True, condition_on_previous_text=False)
+        transcript = [(float(x.start), float(x.end), re.sub(r'\s+', '', x.text))
+                      for x in segments if x.text.strip() and x.end > x.start]
+    finally:
+        audio.unlink(missing_ok=True)
+    if not transcript:
+        raise ValueError('音声から会話を検出できませんでした')
+    candidates = []
+    emphatic = ('なぜ', 'なんで', '本当', '実は', 'まさか', 'でも', 'いや', '絶対', '問題',
+                'おかしい', '違う', 'すごい', 'びっくり', 'どうして', 'つまり', '結局', '？', '?', '！', '!')
+    for i, (begin, _, _) in enumerate(transcript):
+        for length in (30, 35, 40, 45):
+            if begin + length > duration:
+                continue
+            included = [x for x in transcript[i:] if x[0] < begin + length and x[1] > begin]
+            if not included:
+                continue
+            words = ''.join(x[2] for x in included)
+            spoken = sum(max(0, min(x[1], begin+length)-max(x[0], begin)) for x in included)
+            density = spoken / length
+            if density < .45 or len(words) < 35:
+                continue
+            # Penalize speech cut at the end; prefer gaps between turns.
+            last_end = included[-1][1]
+            boundary = min(abs(last_end-(begin+length)), 4)
+            signals = sum(words.count(w) for w in emphatic)
+            score = density * 4 + min(signals, 8) * .38 + min(len(words)/length, 5) * .18 - boundary * .25
+            # Avoid very first/last moments of the source unless transcript naturally starts there.
+            if begin < 4:
+                score -= .5
+            quote = next((x[2] for x in included if len(x[2]) >= 9 and any(w in x[2] for w in emphatic)), '')
+            if not quote:
+                quote = max((x[2] for x in included), key=len)
+            quote = re.sub(r'[\r\n\t]', '', quote).strip('、。 　')
+            if len(quote) > 22:
+                quote = quote[:21] + '…'
+            headline = ('注目発言｜' + quote)[:26]
+            candidates.append((score, begin, length, headline))
+    candidates.sort(reverse=True)
+    chosen = []
+    for score, begin, length, headline in candidates:
+        if all(begin + length + 5 <= old[0] or old[0] + old[1] + 5 <= begin
+               for old in chosen):
+            chosen.append((begin, length, headline))
+        if len(chosen) == count:
+            break
+    if len(chosen) < count:
+        raise ValueError(f'重複しない候補が{len(chosen)}本しか見つかりません。長い動画を使うか生成本数を減らしてください')
+    return [(headline, int(begin), length) for begin, length, headline in chosen]
+
+
 @app.post('/batch')
 def batch():
     if not authorized():
@@ -252,7 +313,8 @@ def batch():
         if mode not in ('original', 'auto'):
             raise ValueError('字幕設定が不正です')
         specs = []
-        for i in range(1, count + 1):
+        manual = request.form.get('manual') == 'on'
+        for i in range(1, count + 1) if manual else ():
             headline = request.form.get(f'headline_{i}', '').strip()
             start_raw = request.form.get(f'start_{i}', '').strip()
             length = int(request.form.get(f'length_{i}', '35'))
@@ -272,6 +334,8 @@ def batch():
         if source.stat().st_size > MAX_JOBS_BYTES:
             raise ValueError('ファイルが大きすぎます')
         duration = media_duration(source)
+        if not manual:
+            specs = select_highlights(source, duration, count)
         for i, (headline, start, length) in enumerate(specs, 1):
             if start + length > duration:
                 warnings.append(f'{i}本目：元動画の終了時刻を超えるためスキップしました')
@@ -290,7 +354,7 @@ def batch():
         return page(results=results, warnings=warnings)
     except Exception as exc:
         app.logger.warning('Batch failed: %s', str(exc)[:500])
-        return page(error='アップロードまたは動画の読み込みに失敗しました'), 422
+        return page(error=str(exc) if isinstance(exc, ValueError) else 'アップロード・文字起こし・動画の処理に失敗しました。Renderログを確認してください'), 422
     finally:
         shutil.rmtree(job, ignore_errors=True)
 
